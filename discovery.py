@@ -106,11 +106,22 @@ def run_discovery():
             candidate_seed_count[name] = candidate_seed_count.get(name, 0) + 1
         time.sleep(0.2)
 
-    print(f"\n{len(candidate_scores)} unique candidates found. Hydrating via Spotify...")
+    print(f"\n{len(candidate_scores)} unique candidates found.")
+
+    # Cap how many we hydrate via Spotify — each one is a network call, and too many
+    # will blow past the web server's request timeout. Prioritize candidates that
+    # showed up across multiple seeds (strongest similarity signal) first.
+    MAX_TO_HYDRATE = 60
+    ranked_names = sorted(
+        candidate_scores.keys(),
+        key=lambda n: (-candidate_seed_count[n], -candidate_scores[n])
+    )[:MAX_TO_HYDRATE]
+
+    print(f"Hydrating top {len(ranked_names)} via Spotify...")
 
     scored = []
     skipped = 0
-    for name in candidate_scores:
+    for name in ranked_names:
         try:
             art = find_spotify_artist(sp, name)
             if not art:
@@ -138,7 +149,6 @@ def run_discovery():
         except Exception as e:
             skipped += 1
             print(f"  ⚠ Skipping '{name}' due to error: {e}")
-        time.sleep(0.05)
 
     if skipped:
         print(f"Skipped {skipped} candidates due to missing/malformed Spotify data.")
