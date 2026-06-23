@@ -1,11 +1,12 @@
 """
 discovery.py
 Core logic:
-  - Last.fm provides the similarity engine (artist.getSimilar, artist.getTopTags) —
-    Spotify restricted related-artists and genre tags to approved partners only,
-    so Last.fm's public, unrestricted API does this job instead.
-  - Spotify is used only for metadata that still works for any app: search,
-    follower counts, popularity score, and the artist's Spotify link.
+  - Last.fm provides BOTH the similarity engine (artist.getSimilar) AND the
+    audience stats (artist.getInfo -> listeners/playcount). Spotify has
+    restricted genres, followers, and popularity fields on artist objects to
+    apps with "Extended Quota Mode" approval — unapproved apps (like this one)
+    get back only bare identity info (name, id, link), nothing else.
+  - Spotify is used only to grab the artist's public profile link.
 """
 
 import os
@@ -27,9 +28,10 @@ SEED_ARTISTS = [
     "Brent Faiyaz",
 ]
 
-MAX_POPULARITY = 55       # Spotify popularity 0-100, lower = more underground
-MIN_FOLLOWERS = 500
-SIMILAR_PER_SEED = 30      # how many similar artists to pull per seed from Last.fm
+MAX_LISTENERS = 150000     # Last.fm listener count ceiling — lower = more underground
+MIN_LISTENERS = 200         # filter out near-zero-presence accounts
+SIMILAR_PER_SEED = 30
+MAX_TO_SCORE = 80           # cap total candidates processed per run
 
 DATA_PATH = os.path.join(os.path.dirname(__file__), "candidate_artists.csv")
 LASTFM_API_URL = "https://ws.audioscrobbler.com/2.0/"
@@ -67,24 +69,47 @@ def lastfm_similar_artists(artist_name, api_key, limit=SIMILAR_PER_SEED):
         matches = data.get("similarartists", {}).get("artist", [])
         return [(m["name"], float(m.get("match", 0))) for m in matches]
     except Exception as e:
-        print(f"  ⚠ Last.fm similar-artist lookup failed for '{artist_name}': {e}")
+        print(f"  WARNING: Last.fm similar-artist lookup failed for '{artist_name}': {e}")
         return []
 
 
-def find_spotify_artist(sp, name):
+def lastfm_artist_info(artist_name, api_key):
+    """Returns (listeners, playcount, top_tags) or None if lookup fails."""
+    params = {
+        "method": "artist.getInfo",
+        "artist": artist_name,
+        "api_key": api_key,
+        "format": "json",
+    }
+    try:
+        resp = requests.get(LASTFM_API_URL, params=params, timeout=10)
+        data = resp.json()
+        artist = data.get("artist")
+        if not artist:
+            return None
+        stats = artist.get("stats", {})
+        listeners = int(stats.get("listeners", 0))
+        playcount = int(stats.get("playcount", 0))
+        tags = [t["name"] for t in artist.get("tags", {}).get("tag", [])]
+        return listeners, playcount, tags
+    except Exception as e:
+        print(f"  WARNING: Last.fm artist info failed for '{artist_name}': {e}")
+        return None
+
+
+def find_spotify_link(sp, name):
+    """Best-effort: just grab the Spotify profile URL, nothing else."""
     try:
         results = sp.search(q=name, type="artist", limit=5)
         items = results["artists"]["items"]
-    except Exception as e:
-        print(f"  ⚠ Spotify search failed for '{name}': {type(e).__name__}: {e}")
-        return None
+    except Exception:
+        return ""
     if not items:
-        print(f"  ⚠ No Spotify match found for '{name}'")
-        return None
+        return ""
     for item in items:
         if item["name"].lower() == name.lower():
-            return item
-    return items[0]
+            return item.get("external_urls", {}).get("spotify", "")
+    return items[0].get("external_urls", {}).get("spotify", "")
 
 
 def run_discovery():
@@ -92,9 +117,7 @@ def run_discovery():
     lastfm_key = get_lastfm_key()
 
     print("Gathering similar artists from Last.fm...")
-    # candidate_name -> best (highest) match score seen across all seeds
     candidate_scores = {}
-    # candidate_name -> count of seeds that surfaced them (a stronger signal than raw match score)
     candidate_seed_count = {}
 
     for seed in SEED_ARTISTS:
@@ -102,71 +125,56 @@ def run_discovery():
         print(f"  {seed}: {len(similar)} similar artists found")
         for name, match_score in similar:
             if name.lower() in (s.lower() for s in SEED_ARTISTS):
-                continue  # skip if it's just another seed artist
+                continue
             candidate_scores[name] = max(candidate_scores.get(name, 0), match_score)
             candidate_seed_count[name] = candidate_seed_count.get(name, 0) + 1
         time.sleep(0.2)
 
     print(f"\n{len(candidate_scores)} unique candidates found.")
 
-    # Cap how many we hydrate via Spotify — each one is a network call, and too many
-    # will blow past the web server's request timeout. Prioritize candidates that
-    # showed up across multiple seeds (strongest similarity signal) first.
-    MAX_TO_HYDRATE = 60
     ranked_names = sorted(
         candidate_scores.keys(),
         key=lambda n: (-candidate_seed_count[n], -candidate_scores[n])
-    )[:MAX_TO_HYDRATE]
+    )[:MAX_TO_SCORE]
 
-    print(f"Hydrating top {len(ranked_names)} via Spotify...")
+    print(f"Pulling Last.fm stats for top {len(ranked_names)} candidates...")
 
     scored = []
     skipped = 0
-    debug_printed = False
     for name in ranked_names:
         try:
-            art = find_spotify_artist(sp, name)
-            if not art:
-                continue  # not on Spotify, skip
-
-            if not debug_printed:
-                print(f"DEBUG raw artist object for '{name}': {art}")
-                debug_printed = True
-
-            followers = art.get("followers", {}).get("total")
-            popularity = art.get("popularity")
-
-            if followers is None or popularity is None:
+            info = lastfm_artist_info(name, lastfm_key)
+            if not info:
                 skipped += 1
-                continue  # malformed/incomplete result from Spotify, skip safely
+                continue
+            listeners, playcount, tags = info
 
-            if popularity <= MAX_POPULARITY and followers >= MIN_FOLLOWERS:
+            if MIN_LISTENERS <= listeners <= MAX_LISTENERS:
+                spotify_url = find_spotify_link(sp, name)
                 scored.append({
-                    "name": art.get("name", name),
+                    "name": name,
                     "lastfm_match_score": round(candidate_scores[name], 3),
                     "seed_overlap_count": candidate_seed_count[name],
-                    "genres": ", ".join(art.get("genres", [])),
-                    "followers": followers,
-                    "popularity": popularity,
-                    "spotify_url": art.get("external_urls", {}).get("spotify", ""),
+                    "tags": ", ".join(tags[:5]),
+                    "listeners": listeners,
+                    "playcount": playcount,
+                    "spotify_url": spotify_url,
                     "email_found": "",
                     "approved": "",
                 })
         except Exception as e:
             skipped += 1
-            print(f"  ⚠ Skipping '{name}' due to error: {e}")
+            print(f"  WARNING: Skipping '{name}' due to error: {e}")
         time.sleep(0.15)
 
     if skipped:
-        print(f"Skipped {skipped} candidates due to missing/malformed Spotify data.")
+        print(f"Skipped {skipped} candidates due to missing Last.fm data or errors.")
 
-    # Rank: prioritize how many seed artists pointed to this candidate, then raw match strength,
-    # then favor lower popularity (more underground / earlier to find)
-    scored.sort(key=lambda x: (-x["seed_overlap_count"], -x["lastfm_match_score"], x["popularity"]))
+    scored.sort(key=lambda x: (-x["seed_overlap_count"], -x["lastfm_match_score"], x["listeners"]))
 
     with open(DATA_PATH, "w", newline="") as f:
-        fieldnames = ["name", "lastfm_match_score", "seed_overlap_count", "genres",
-                      "followers", "popularity", "spotify_url", "email_found", "approved"]
+        fieldnames = ["name", "lastfm_match_score", "seed_overlap_count", "tags",
+                      "listeners", "playcount", "spotify_url", "email_found", "approved"]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for row in scored:
