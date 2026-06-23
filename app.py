@@ -15,7 +15,7 @@ def dashboard():
     candidates = load_candidates()
     genre_filter = request.args.get("genre", "").lower().strip()
     if genre_filter:
-        candidates = [c for c in candidates if genre_filter in c["genres"].lower()]
+        candidates = [c for c in candidates if genre_filter in c.get("tags", "").lower()]
     return render_template("dashboard.html", candidates=candidates, genre_filter=genre_filter)
 
 
