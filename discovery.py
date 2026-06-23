@@ -122,11 +122,16 @@ def run_discovery():
 
     scored = []
     skipped = 0
+    debug_printed = False
     for name in ranked_names:
         try:
             art = find_spotify_artist(sp, name)
             if not art:
                 continue  # not on Spotify, skip
+
+            if not debug_printed:
+                print(f"DEBUG raw artist object for '{name}': {art}")
+                debug_printed = True
 
             followers = art.get("followers", {}).get("total")
             popularity = art.get("popularity")
