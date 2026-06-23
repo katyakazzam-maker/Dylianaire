@@ -76,9 +76,10 @@ def find_spotify_artist(sp, name):
         results = sp.search(q=name, type="artist", limit=5)
         items = results["artists"]["items"]
     except Exception as e:
-        print(f"  ⚠ Spotify search failed for '{name}': {e}")
+        print(f"  ⚠ Spotify search failed for '{name}': {type(e).__name__}: {e}")
         return None
     if not items:
+        print(f"  ⚠ No Spotify match found for '{name}'")
         return None
     for item in items:
         if item["name"].lower() == name.lower():
@@ -149,6 +150,7 @@ def run_discovery():
         except Exception as e:
             skipped += 1
             print(f"  ⚠ Skipping '{name}' due to error: {e}")
+        time.sleep(0.15)
 
     if skipped:
         print(f"Skipped {skipped} candidates due to missing/malformed Spotify data.")
