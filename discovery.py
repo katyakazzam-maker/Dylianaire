@@ -109,27 +109,39 @@ def run_discovery():
     print(f"\n{len(candidate_scores)} unique candidates found. Hydrating via Spotify...")
 
     scored = []
+    skipped = 0
     for name in candidate_scores:
-        art = find_spotify_artist(sp, name)
-        if not art:
-            continue  # not on Spotify, skip (could still be valuable but no metadata to filter on)
+        try:
+            art = find_spotify_artist(sp, name)
+            if not art:
+                continue  # not on Spotify, skip
 
-        followers = art["followers"]["total"]
-        popularity = art["popularity"]
+            followers = art.get("followers", {}).get("total")
+            popularity = art.get("popularity")
 
-        if popularity <= MAX_POPULARITY and followers >= MIN_FOLLOWERS:
-            scored.append({
-                "name": art["name"],
-                "lastfm_match_score": round(candidate_scores[name], 3),
-                "seed_overlap_count": candidate_seed_count[name],
-                "genres": ", ".join(art.get("genres", [])),
-                "followers": followers,
-                "popularity": popularity,
-                "spotify_url": art["external_urls"]["spotify"],
-                "email_found": "",
-                "approved": "",
-            })
+            if followers is None or popularity is None:
+                skipped += 1
+                continue  # malformed/incomplete result from Spotify, skip safely
+
+            if popularity <= MAX_POPULARITY and followers >= MIN_FOLLOWERS:
+                scored.append({
+                    "name": art.get("name", name),
+                    "lastfm_match_score": round(candidate_scores[name], 3),
+                    "seed_overlap_count": candidate_seed_count[name],
+                    "genres": ", ".join(art.get("genres", [])),
+                    "followers": followers,
+                    "popularity": popularity,
+                    "spotify_url": art.get("external_urls", {}).get("spotify", ""),
+                    "email_found": "",
+                    "approved": "",
+                })
+        except Exception as e:
+            skipped += 1
+            print(f"  ⚠ Skipping '{name}' due to error: {e}")
         time.sleep(0.05)
+
+    if skipped:
+        print(f"Skipped {skipped} candidates due to missing/malformed Spotify data.")
 
     # Rank: prioritize how many seed artists pointed to this candidate, then raw match strength,
     # then favor lower popularity (more underground / earlier to find)
