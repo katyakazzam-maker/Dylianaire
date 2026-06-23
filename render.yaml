@@ -3,7 +3,7 @@ services:
     name: dylantic
     env: python
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "gunicorn app:app"
+    startCommand: "gunicorn app:app --timeout 120"
     envVars:
       - key: SPOTIFY_CLIENT_ID
         sync: false
