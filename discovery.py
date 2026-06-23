@@ -1,14 +1,18 @@
 """
 discovery.py
-Core logic: pulls seed artists, expands the related-artist graph on Spotify,
-scores candidates, and resolves contact info where available.
+Core logic: pulls seed artists, derives their genres, then finds candidates via:
+  1. Genre-based search (Spotify's related-artists endpoint is restricted to
+     approved partners only, so we don't use it)
+  2. Playlist mining: finds public playlists containing seed artists, then
+     pulls every other artist featured on those playlists
+
+Candidates are scored by genre overlap + how many seed-playlists they
+co-occur in, then filtered by popularity/follower thresholds.
 """
 
 import os
-import re
 import time
 import csv
-import requests
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 
@@ -26,10 +30,10 @@ SEED_ARTISTS = [
 
 MAX_POPULARITY = 55
 MIN_FOLLOWERS = 500
-HOPS = 2
+PLAYLISTS_PER_SEED = 5       # how many playlists to check per seed artist
+MAX_TRACKS_PER_PLAYLIST = 100
 
 DATA_PATH = os.path.join(os.path.dirname(__file__), "candidate_artists.csv")
-EMAIL_REGEX = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 
 
 def get_spotify_client():
@@ -54,94 +58,144 @@ def find_artist(sp, name):
     return items[0]
 
 
-def expand_related(sp, seed_ids, hops=HOPS):
-    seen = set(seed_ids)
-    frontier = set(seed_ids)
+def search_by_genre(sp, genres, limit_per_genre=25):
+    """Search Spotify directly for artists tagged with seed genres."""
     candidates = {}
-
-    for _ in range(hops):
-        next_frontier = set()
-        for aid in frontier:
-            try:
-                related = sp.artist_related_artists(aid)["artists"]
-            except Exception:
-                continue
-            for art in related:
-                if art["id"] not in seen:
-                    candidates[art["id"]] = art
-                    next_frontier.add(art["id"])
-            time.sleep(0.1)
-        seen |= next_frontier
-        frontier = next_frontier
-
+    for genre in genres:
+        try:
+            query = f'genre:"{genre}"'
+            results = sp.search(q=query, type="artist", limit=limit_per_genre)
+            for art in results["artists"]["items"]:
+                candidates[art["id"]] = art
+        except Exception as e:
+            print(f"  ⚠ genre search failed for '{genre}': {e}")
+        time.sleep(0.1)
     return candidates
 
 
-def score_candidate(artist, seed_genres):
+def mine_playlists(sp, seed_names, candidates_accum, co_occurrence):
+    """Find playlists featuring seed artists, then pull other artists from them."""
+    for name in seed_names:
+        try:
+            results = sp.search(q=name, type="playlist", limit=PLAYLISTS_PER_SEED)
+            playlists = results.get("playlists", {}).get("items", [])
+        except Exception as e:
+            print(f"  ⚠ playlist search failed for '{name}': {e}")
+            continue
+
+        for pl in playlists:
+            if not pl:
+                continue
+            try:
+                tracks = sp.playlist_tracks(pl["id"], limit=MAX_TRACKS_PER_PLAYLIST)
+            except Exception:
+                continue
+            for item in tracks.get("items", []):
+                track = item.get("track")
+                if not track:
+                    continue
+                for art in track.get("artists", []):
+                    aid = art["id"]
+                    co_occurrence[aid] = co_occurrence.get(aid, 0) + 1
+                    if aid not in candidates_accum:
+                        candidates_accum[aid] = art  # partial object, hydrated later
+            time.sleep(0.1)
+
+
+def hydrate_artists(sp, artist_ids):
+    """Spotify search/playlist results don't include genres/followers —
+    fetch full artist objects in batches of 50."""
+    full = {}
+    ids = list(artist_ids)
+    for i in range(0, len(ids), 50):
+        batch = ids[i:i+50]
+        try:
+            result = sp.artists(batch)
+            for art in result["artists"]:
+                if art:
+                    full[art["id"]] = art
+        except Exception as e:
+            print(f"  ⚠ hydrate batch failed: {e}")
+        time.sleep(0.1)
+    return full
+
+
+def score_candidate(artist, seed_genres, co_occurrence_count):
     genres = set(g.lower() for g in artist.get("genres", []))
     overlap = len(genres & seed_genres)
     followers = artist["followers"]["total"]
     popularity = artist["popularity"]
-    return overlap, followers, popularity
-
-
-def try_find_contact(artist):
-    """
-    Best-effort contact resolution. Checks Spotify's linked external URLs.
-    Instagram/Linktree bio scraping is intentionally NOT automated here —
-    those pages require a logged-in session for reliable access and scraping
-    them at scale risks violating platform terms of service. Use the
-    Spotify-provided link as a manual jumping-off point instead.
-    """
-    spotify_url = artist["external_urls"].get("spotify", "")
-    return {
-        "spotify_url": spotify_url,
-        "email_found": "",  # left blank by design; fill in manually after a quick check
-    }
+    return overlap, followers, popularity, co_occurrence_count
 
 
 def run_discovery():
     sp = get_spotify_client()
 
+    print("Looking up seed artists...")
     seed_objs = []
     for name in SEED_ARTISTS:
         art = find_artist(sp, name)
         if art:
             seed_objs.append(art)
 
-    seed_ids = [a["id"] for a in seed_objs]
+    seed_ids = set(a["id"] for a in seed_objs)
     seed_genres = set()
     for a in seed_objs:
         seed_genres |= set(g.lower() for g in a.get("genres", []))
 
-    candidates = expand_related(sp, seed_ids, hops=HOPS)
+    print(f"Seed genre pool: {seed_genres}")
 
+    print("Searching by genre...")
+    genre_candidates = search_by_genre(sp, seed_genres) if seed_genres else {}
+
+    print("Mining playlists for co-occurring artists...")
+    co_occurrence = {}
+    playlist_candidates = {}
+    mine_playlists(sp, SEED_ARTISTS, playlist_candidates, co_occurrence)
+
+    # Merge candidate ID pools, hydrate playlist-derived ones (genre search already full objects)
+    all_ids = set(genre_candidates.keys()) | set(playlist_candidates.keys())
+    all_ids -= seed_ids  # don't recommend the seeds themselves
+
+    print(f"Hydrating {len(all_ids)} total candidates...")
+    hydrated = dict(genre_candidates)
+    needs_hydration = [aid for aid in all_ids if aid not in hydrated]
+    hydrated.update(hydrate_artists(sp, needs_hydration))
+
+    print("Scoring candidates...")
     scored = []
-    for cid, art in candidates.items():
-        overlap, followers, popularity = score_candidate(art, seed_genres)
+    for aid in all_ids:
+        art = hydrated.get(aid)
+        if not art:
+            continue
+        co_count = co_occurrence.get(aid, 0)
+        overlap, followers, popularity, co_count = score_candidate(art, seed_genres, co_count)
+
         if popularity <= MAX_POPULARITY and followers >= MIN_FOLLOWERS:
-            contact = try_find_contact(art)
             scored.append({
                 "name": art["name"],
                 "genre_overlap": overlap,
+                "playlist_co_occurrence": co_count,
                 "genres": ", ".join(art.get("genres", [])),
                 "followers": followers,
                 "popularity": popularity,
-                "spotify_url": contact["spotify_url"],
-                "email_found": contact["email_found"],
+                "spotify_url": art["external_urls"]["spotify"],
+                "email_found": "",
                 "approved": "",
             })
 
-    scored.sort(key=lambda x: (-x["genre_overlap"], x["popularity"]))
+    # Rank: prioritize playlist co-occurrence (real curation signal), then genre overlap, then underground-ness
+    scored.sort(key=lambda x: (-x["playlist_co_occurrence"], -x["genre_overlap"], x["popularity"]))
 
     with open(DATA_PATH, "w", newline="") as f:
-        fieldnames = ["name", "genre_overlap", "genres", "followers",
-                      "popularity", "spotify_url", "email_found", "approved"]
+        fieldnames = ["name", "genre_overlap", "playlist_co_occurrence", "genres",
+                      "followers", "popularity", "spotify_url", "email_found", "approved"]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for row in scored:
             writer.writerow(row)
 
+    print(f"Done. {len(scored)} candidates written.")
     return scored
 
 
