@@ -24,7 +24,7 @@
   <p class="sub">AI-powered crate-digging — finds artists who sound like your reference list before they blow up.</p>
 
   <form class="controls" method="get" action="/">
-    <input type="text" name="genre" placeholder="Filter by genre (e.g. r&b)" value="{{ genre_filter }}">
+    <input type="text" name="genre" placeholder="Filter by tag (e.g. r&b)" value="{{ genre_filter }}">
     <button type="submit">Filter</button>
   </form>
 
@@ -39,9 +39,9 @@
         <th>Artist</th>
         <th>Seed Overlap</th>
         <th>Match Score</th>
-        <th>Genres</th>
-        <th>Followers</th>
-        <th>Popularity</th>
+        <th>Tags</th>
+        <th>Listeners</th>
+        <th>Playcount</th>
         <th>Spotify</th>
       </tr>
     </thead>
@@ -51,9 +51,9 @@
         <td>{{ c.name }}</td>
         <td class="score">{{ c.seed_overlap_count }}</td>
         <td class="score">{{ c.lastfm_match_score }}</td>
-        <td>{{ c.genres }}</td>
-        <td>{{ c.followers }}</td>
-        <td>{{ c.popularity }}</td>
+        <td>{{ c.tags }}</td>
+        <td>{{ c.listeners }}</td>
+        <td>{{ c.playcount }}</td>
         <td><a href="{{ c.spotify_url }}" target="_blank">Open ↗</a></td>
       </tr>
       {% endfor %}
