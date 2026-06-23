@@ -37,7 +37,8 @@
     <thead>
       <tr>
         <th>Artist</th>
-        <th>Match Score</th>
+        <th>Playlist Match</th>
+        <th>Genre Overlap</th>
         <th>Genres</th>
         <th>Followers</th>
         <th>Popularity</th>
@@ -48,6 +49,7 @@
       {% for c in candidates %}
       <tr>
         <td>{{ c.name }}</td>
+        <td class="score">{{ c.playlist_co_occurrence }}</td>
         <td class="score">{{ c.genre_overlap }}</td>
         <td>{{ c.genres }}</td>
         <td>{{ c.followers }}</td>
