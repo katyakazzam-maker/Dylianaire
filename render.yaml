@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: dylantic
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn app:app"
+    envVars:
+      - key: SPOTIFY_CLIENT_ID
+        sync: false
+      - key: SPOTIFY_CLIENT_SECRET
+        sync: false
+
+  - type: cron
+    name: dylantic-weekly-refresh
+    env: python
+    schedule: "0 9 * * 1"
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python -c 'from discovery import run_discovery; run_discovery()'"
+    envVars:
+      - key: SPOTIFY_CLIENT_ID
+        sync: false
+      - key: SPOTIFY_CLIENT_SECRET
+        sync: false
